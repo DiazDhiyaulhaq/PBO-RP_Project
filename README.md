@@ -4,7 +4,7 @@
 ## Installation
 Simply install to your project:
 ```bash
-sampctl package install NvalrnzJuju/VRP
+sampctl package install 	pborp/VRP
 ```
 
 Include to your script:
