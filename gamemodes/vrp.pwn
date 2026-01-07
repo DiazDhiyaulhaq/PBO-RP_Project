@@ -66,7 +66,7 @@ forward Float:GetVehicleSpeed(vehicleid, bool:kmh = true, Float:velx = 0.0, Floa
 new HasPacket[MAX_PLAYERS]; // 0 = Tidak bawa, 1 = Bawa
 new TackleMode[MAX_PLAYERS];      // Pengganti E_PLAYER_TACKLE_ACTIVE
 new KnockedDown[MAX_PLAYERS];     // Pengganti E_PLAYER_IS_TACKLED
-new Timer:TackleTimer[MAX_PLAYERS]; // Untuk timer animasi fix
+new TackleTimer[MAX_PLAYERS]; // Untuk timer animasi fix
 forward TackleUnfreeze(playerid);
 forward TackleAnimFix(playerid);
 new DCC_Channel:Whitelist;
@@ -13298,7 +13298,8 @@ stock IsPlayerNearPlayer(playerid, targetid, Float:radius)
 
 ConvertTimestamp(Time:timestamp, bool:fullDate = true, bool:onlyTime = false, bool:onlyDate = false)
 {
-    new output[256], timee[e_tm];
+    new output[256];
+    new tm:timee[e_tm];
     localtime(timestamp, timee);
 
     if (fullDate) strftime(output, sizeof(output), "%a %d %b %Y, %H:%M:%S", timee);
@@ -21006,55 +21007,63 @@ public OnPlayerGiveDamage(playerid, damagedid, Float:amount, weaponid, bodypart)
         // ==========================================
         if(weaponid == 0 && TackleMode[playerid] == 1)
         {
-            // Matikan Mode Tackle (Sekali pakai)
-            TackleMode[playerid] = 0;
+                // Matikan Mode Tackle (sekali pakai)
+                TackleMode[playerid] = 0;
 
-            // Validasi Kondisi
-            if(KnockedDown[playerid] == 0 && KnockedDown[damagedid] == 0
-            && !IsPlayerInAnyVehicle(playerid) && !IsPlayerInAnyVehicle(damagedid)
-            && PlayerData[damagedid][pGender] != 2)
-            {
-                new rands = random(2) + 1;
-
-                if(rands == 1) // SUKSES TACKLE
+                // Validasi Kondisi: kedua pemain tidak sedang jatuh, on-foot, empty hands, dan penyerang level >= 3
+                if (KnockedDown[playerid] == 0 && KnockedDown[damagedid] == 0
+                    && !IsPlayerInAnyVehicle(playerid) && !IsPlayerInAnyVehicle(damagedid)
+                    && GetPlayerState(playerid) == PLAYER_STATE_ONFOOT && GetPlayerState(damagedid) == PLAYER_STATE_ONFOOT
+                    && GetPlayerWeapon(playerid) == 0 && PlayerData[playerid][pScore] >= 3)
                 {
-                    // Kirim pesan RP
-                    SendNearbyMessage(playerid, 30.0, X11_PURPLE, "* %s lunges forward and tackles %s to the ground.", ReturnName(playerid), ReturnName(damagedid));
+                    new rands = random(1); // 0..1
 
-                    KnockedDown[damagedid] = 1; // Tandai target jatuh
-                    TogglePlayerControllable(damagedid, 0); // Freeze target
+                    if(rands == 0) // SUKSES TACKLE (50%)
+                    {
+                        // Kirim pesan RP
+                        SendNearbyMessage(playerid, 30.0, X11_PURPLE, "* %s lunges forward and tackles %s to the ground.", ReturnName(playerid), ReturnName(damagedid));
 
-                    // Animasi
-                    ApplyAnimation(damagedid, "PED", "KO_shot_stom", 4.1, 0, 1, 1, 0, 0, 1); // Target KO
-                    ApplyAnimation(playerid, "PED", "sprint_civi", 4.1, 0, 1, 1, 0, 0, 1); // Penyerang gaya nendang/nabrak
+                        // Tandai kedua pemain jatuh dan freeze keduanya
+                        KnockedDown[damagedid] = 1;
+                        KnockedDown[playerid] = 1;
+                        TogglePlayerControllable(damagedid, 0);
+                        TogglePlayerControllable(playerid, 0);
 
-                    // Timer bangun target (20 detik)
-                    SetTimerEx("ClearKnock", 20000, false, "i", damagedid);
+                        // Animasi jatuh untuk target dan penyerang
+                        ApplyAnimation(damagedid, "PED", "FLOOR_hit_f", 4.1, 0, 1, 1, 1, 0, 1);
+                        ApplyAnimation(playerid, "PED", "FLOOR_hit_f", 4.1, 0, 1, 1, 1, 0, 1);
 
-                    SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: "GREEN"Berhasil!"WHITE" Mode tackle dinonaktifkan.");
+                        // Pastikan animasi tetap (timer per-player)
+                        TackleTimer[damagedid] = SetTimerEx("TackleAnimFix", 1000, true, "d", damagedid);
+                        TackleTimer[playerid] = SetTimerEx("TackleAnimFix", 1000, true, "d", playerid);
+
+                        // Timer bangun keduanya (6 detik)
+                        SetTimerEx("ClearKnock", 6000, false, "i", damagedid);
+                        SetTimerEx("ClearKnock", 6000, false, "i", playerid);
+
+                        SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: "GREEN"Berhasil!"WHITE" Mode tackle dinonaktifkan.");
+                    }
+                    else // GAGAL TACKLE
+                    {
+                        // Kirim pesan RP
+                        SendNearbyMessage(playerid, 30.0, X11_PURPLE, "* %s attempts to tackle %s but misses and falls over.", ReturnName(playerid), ReturnName(damagedid));
+
+                        // Penalty: penyerang jatuh dan terkena stun selama 4 detik
+                        KnockedDown[playerid] = 1;
+                        TogglePlayerControllable(playerid, 0);
+                        ApplyAnimation(playerid, "CRACK", "crckdeth4", 4.0, 0, 0, 0, 1, 0, 1);
+                        PlayerData[playerid][pStunned] = 4; // 4 detik stun
+
+                        // Timer bangun penyerang (4 detik)
+                        SetTimerEx("ClearKnock", 4000, false, "i", playerid);
+
+                        SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: "RED"Gagal!"WHITE" Kamu terjatuh karena meleset! Gunakan /tackle lagi untuk mencoba.");
+                    }
                 }
-                else // GAGAL TACKLE (PENALTY PENYERANG)
+                else
                 {
-                    // Kirim pesan RP
-                    SendNearbyMessage(playerid, 30.0, X11_PURPLE, "* %s attempts to tackle %s but misses and falls over.", ReturnName(playerid), ReturnName(damagedid));
-
-                    // PENALTY BUAT PENYERANG
-                    KnockedDown[playerid] = 1; // Tandai penyerang jatuh juga (sebentar)
-                    TogglePlayerControllable(playerid, 0); // Freeze penyerang
-
-                    // Animasi Jatuh "Nyergap Gagal" (Terseret ke depan)
-                    ApplyAnimation(playerid, "PED", "KO_skid_front", 4.1, 0, 1, 1, 0, 0, 1);
-
-                    // Timer bangun penyerang (3 Detik saja, cukup buat hukuman)
-                    SetTimerEx("ClearKnock", 3000, false, "i", playerid);
-
-                    SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: "RED"Gagal!"WHITE" Kamu terjatuh karena meleset!");
+                    SendErrorMessage(playerid, "Kondisi tidak valid. Pastikan target dan kamu on-foot, tidak sedang jatuh, dan kamu level 3.");
                 }
-            }
-            else
-            {
-                 SendErrorMessage(playerid, "Kondisi tidak valid (Target di mobil/wanita/sedang jatuh). Mode nonaktif.");
-            }
         }
         // ==========================================
 
@@ -68251,15 +68260,15 @@ CMD:getvisibleitems(playerid, params[])
 
 CMD:tackle(playerid, params[])
 {
-    // 1. Cek Faction (Khusus Polisi - Biasanya ID 1 di VRP)
-    // Sesuaikan angka '1' dengan ID faction polisimu
-    if(PlayerData[playerid][pFaction] != 0)
-        return SendErrorMessage(playerid, "you're not law enforcement!");
+    // 1. Require level 3, on-foot, and empty hands to toggle tackle mode
+    if (PlayerData[playerid][pScore] < 3)
+        return SendErrorMessage(playerid, "You must be level 3 to use tackle.");
+    if (GetPlayerState(playerid) != PLAYER_STATE_ONFOOT)
+        return SendErrorMessage(playerid, "You must be on-foot to use tackle.");
+    if (GetPlayerWeapon(playerid) != 0)
+        return SendErrorMessage(playerid, "Put away your weapon to use tackle.");
 
-    // 2. Cek Duty (Opsional, aktifkan jika perlu)
-    // if(PlayerData[playerid][pOnDuty] == 0) return SendErrorMessage(playerid, "Kamu harus On Duty!");
-
-    // 3. Cek Kondisi (Sekarat/Injured/Cuffed)
+    // 2. Cek Kondisi (Sekarat/Injured/Cuffed)
     if(PlayerData[playerid][pInjured] || PlayerData[playerid][pCuffed] || KnockedDown[playerid])
         return SendErrorMessage(playerid, "Kamu tidak bisa melakukan ini dalam kondisimu sekarang.");
 
