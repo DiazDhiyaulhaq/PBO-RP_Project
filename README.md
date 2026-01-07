@@ -1,5 +1,4 @@
 # PBO Roleplay
-[![sampctl](https://img.shields.io/badge/SAMPCTL-Vision-Gamers--Roleplay-2f2f2f.svg?style=for-the-badge)(https://github.com/DiazDhiyaulhaq/PBO-RP_Project)]
 
 ## Installationz
 Simply install to your project:
