@@ -67,8 +67,10 @@ new HasPacket[MAX_PLAYERS]; // 0 = Tidak bawa, 1 = Bawa
 new TackleMode[MAX_PLAYERS];      // Pengganti E_PLAYER_TACKLE_ACTIVE
 new KnockedDown[MAX_PLAYERS];     // Pengganti E_PLAYER_IS_TACKLED
 new TackleTimer[MAX_PLAYERS]; // Untuk timer animasi fix
+new TackleCooldown[MAX_PLAYERS]; // Cooldown sistem tackle (dalam ms)
 forward TackleUnfreeze(playerid);
 forward TackleAnimFix(playerid);
+forward ClearKnock(playerid);
 new DCC_Channel:Whitelist;
 new DCC_Channel:Resetpw;
 new DCC_Channel:Pwadmin;
@@ -5348,9 +5350,13 @@ Dialog:SelectCharacter(playerid, response, listitem, inputtext[])
         PlayerData[playerid][pCharacter] = listitem;
         SetPlayerName(playerid, CharacterList[playerid][listitem]);
 
-        if(!Blacklist_Check(playerid, "Characters", ReturnName(playerid))) {
-            mysql_tquery(g_iHandle, sprintf("SELECT * FROM `characters` WHERE `Character`='%s' ORDER BY `ID` ASC LIMIT 1;", SQL_ReturnEscaped(CharacterList[playerid][PlayerData[playerid][pCharacter]])), "OnQueryFinished", "dd", playerid, THREAD_LOAD_CHARACTERS);
-        }
+        // Store character name untuk di load nanti setelah spawn selection
+        new charName[32];
+        strcpy(charName, CharacterList[playerid][PlayerData[playerid][pCharacter]]);
+        SetPVarString(playerid, "PendingCharLoad", charName);
+        
+        // Trigger a spawn so `OnPlayerSpawn` runs normally
+        SetTimerEx("ForceSpawn", 200, false, "d", playerid);
     }
     return 1;
 }
@@ -20749,6 +20755,8 @@ public OnPlayerStreamIn(playerid, forplayerid)
 
 public OnDialogResponse(playerid, dialogid, response, listitem, inputtext[])
 {
+    // Spawn selection feature removed; no dialog hook here.
+
     if(dialogid == DIALOG_BUYCAR)
     {
         if(response)
@@ -21056,6 +21064,9 @@ public OnPlayerGiveDamage(playerid, damagedid, Float:amount, weaponid, bodypart)
 
                         // Timer bangun penyerang (4 detik)
                         SetTimerEx("ClearKnock", 4000, false, "i", playerid);
+                        
+                        // Set cooldown tackle (3 detik)
+                        TackleCooldown[playerid] = GetTickCount() + 3000;
 
                         SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: "RED"Gagal!"WHITE" Kamu terjatuh karena meleset! Gunakan /tackle lagi untuk mencoba.");
                     }
@@ -29297,38 +29308,67 @@ public OnPlayerSpawn(playerid)
 
     SetPlayerScore(playerid, PlayerData[playerid][pScore]);
 
-    if (!SQL_IsLogged(playerid))
-        return KickEx(playerid);
+    if (!SQL_IsLogged(playerid)) return KickEx(playerid);
+    if (PlayerData[playerid][pFakespawn] == 1) return KickEx(playerid);
 
-    if (PlayerData[playerid][pFakespawn] == 1)
-        return KickEx(playerid);
-        
-
-    
-    /*new label[64];
-    format(label, sizeof(label), "{FFFFFF}(%d) %s", playerid, NormalName(playerid));
-    PlayerData[playerid][pNameTag] = CreateDynamic3DTextLabel(label, 0xFFFFFFFF, 0.0, 0.0, 0.3, 40.0, .attachedplayer = playerid, .testlos = 1);*/
-    
-    if(PlayerData[playerid][pOnDuty])
+    // =========================================================================
+    // 1. CEK REGISTRASI (Prioritas Utama)
+    // =========================================================================
+    if (!PlayerData[playerid][pCreated] && GetPVarInt(playerid, "SelectDia"))
     {
-        if (!IsPlayerInEvent(playerid)) {
-            SetPlayerSkinEx(playerid, PlayerData[playerid][pSkinFaction], 1);
+        new str[64];
+        format(str, sizeof(str), "~b~~h~Name~n~~w~%s", ReturnName(playerid));
+        PlayerTextDrawSetString(playerid, PlayerTextdraws[playerid][textdraw_registrasi][3], str);
 
-            if(PlayerData[playerid][pSpectator] == INVALID_PLAYER_ID)
-                SetFactionColor(playerid);
+        for (new i = 0; i < 20; i ++) {
+            SendClientMessage(playerid , -1, "");
         }
-    }
-    else {
-        if (!IsPlayerInEvent(playerid)) {
-            SetPlayerSkinEx(playerid, PlayerData[playerid][pSkin]);
+
+        for (new i = 0; i < 10; i ++) {
+            PlayerTextDrawShow(playerid, PlayerTextdraws[playerid][textdraw_registrasi][i]);
         }
+        PlayerData[playerid][pSkin] = 98;
+        SetPlayerSkinEx(playerid, 98);
+
+        TogglePlayerGUI(playerid, false);
+
+        PlayerData[playerid][pOrigin][0] = '\0';
+        PlayerData[playerid][pBirthdate][0] = '\0';
+
+        SendServerMessage(playerid, "Data pada karakter anda belum lengkap, isi data sesuai dengan keadaan karakter.");
+        SendServerMessage(playerid, "Arahkan kursor anda ke text '{C0C0C0}UPDATE"WHITE"' samping untuk mengubah data karakter.");
+        SendServerMessage(playerid, "Gunakan command '{C0C0C0}/resetcursor"WHITE"' jika kursor anda hilang pada saat pengisian data.");
+
+        SelectTextDraw(playerid, 0xC0C0C0FF);
+        ResetWeapons(playerid);
+
+        //Hunger Progressbar
+        HidePlayerProgressBar(playerid, PlayerData[playerid][hungry]);
+        HidePlayerProgressBar(playerid, PlayerData[playerid][energy]);
+        //Box spectate textdraw
+        PlayerTextDrawHide(playerid, PlayerTextdraws[playerid][textdraw_spectate][0]);
+
+        SetPlayerPos(playerid, 258.0770, -42.3550, 1002.0234);
+        SetPlayerFacingAngle(playerid,45.5218);
+        SetPlayerInterior(playerid, 14);
+        SetPlayerVirtualWorld(playerid, (playerid+3));
+        SetPlayerCameraPos(playerid,255.014175,-39.542194,1002.023437);
+        SetPlayerCameraLookAt(playerid,257.987945,-42.462291,1002.023437);
+        return 1; // STOP DISINI
     }
 
-    PlayerData[playerid][pKilled] = 0;
+    // =========================================================================
+    // 2. CEK SPECTATE (Mode Hantu)
+    // =========================================================================
+    // Kalau lagi spectate, STOP proses spawn biar posisi gak reset
+    if(PlayerData[playerid][pSpectator] != INVALID_PLAYER_ID)
+    {
+        return 1;
+    }
 
-    if(PlayerData[playerid][pBleeding])
-        PlayerData[playerid][pBleedTime] = 1;
-
+    // =========================================================================
+    // 3. CEK PENJARA (JAIL)
+    // =========================================================================
     if(PlayerData[playerid][pJailTime] > 0)
     {
         for (new i = 0; i < 100; i ++) {
@@ -29355,122 +29395,104 @@ public OnPlayerSpawn(playerid)
         for (new i = 0; i != MAX_ACC; i ++) if (AccData[playerid][i][accExists] && AccData[playerid][i][accShow]) {
             Aksesoris_Attach(playerid, i);
         }
+        return 1; // STOP DISINI
     }
-    else if(PlayerData[playerid][pHospital] != -1)
+
+    // =========================================================================
+    // 4. CEK KONDISI MATI / RUMAH SAKIT
+    // =========================================================================
+    if(PlayerData[playerid][pHospital] != -1)
     {
         SetHospitalSpawn(playerid);
         PlayerData[playerid][pHospitalTime] = 0;
+        return 1; // STOP DISINI
     }
-    else if(!PlayerData[playerid][pCreated])
+
+    // =========================================================================
+    // 5. CEK KONDISI INJURED (TERLUKA)
+    // =========================================================================
+    if(PlayerData[playerid][pInjured])
     {
-        if(GetPVarInt(playerid, "SelectDia"))
-        {
-            new str[64];
-            format(str, sizeof(str), "~b~~h~Name~n~~w~%s", ReturnName(playerid));
-            PlayerTextDrawSetString(playerid, PlayerTextdraws[playerid][textdraw_registrasi][3], str);
-
-            for (new i = 0; i < 20; i ++) {
-                SendClientMessage(playerid , -1, "");
-            }
-
-            for (new i = 0; i < 10; i ++) {
-                PlayerTextDrawShow(playerid, PlayerTextdraws[playerid][textdraw_registrasi][i]);
-            }
-            PlayerData[playerid][pSkin] = 98;
-            SetPlayerSkinEx(playerid, 98);
-
-            TogglePlayerGUI(playerid, false);
-
-            PlayerData[playerid][pOrigin][0] = '\0';
-            PlayerData[playerid][pBirthdate][0] = '\0';
-
-            SendServerMessage(playerid, "Data pada karakter anda belum lengkap, isi data sesuai dengan keadaan karakter.");
-            SendServerMessage(playerid, "Arahkan kursor anda ke text '{C0C0C0}UPDATE"WHITE"' samping untuk mengubah data karakter.");
-            SendServerMessage(playerid, "Gunakan command '{C0C0C0}/resetcursor"WHITE"' jika kursor anda hilang pada saat pengisian data.");
-
-            SelectTextDraw(playerid, 0xC0C0C0FF);
-            ResetWeapons(playerid);
-
-            //Hunger Progressbar
-            HidePlayerProgressBar(playerid, PlayerData[playerid][hungry]);
-            HidePlayerProgressBar(playerid, PlayerData[playerid][energy]);
-            //Box spextate textdraw
-            PlayerTextDrawHide(playerid, PlayerTextdraws[playerid][textdraw_spectate][0]);
-
-            SetPlayerPos(playerid, 258.0770, -42.3550, 1002.0234);
-            SetPlayerFacingAngle(playerid,45.5218);
-            SetPlayerInterior(playerid, 14);
-            SetPlayerVirtualWorld(playerid, (playerid+3));
-            SetPlayerCameraPos(playerid,255.014175,-39.542194,1002.023437);
-            SetPlayerCameraLookAt(playerid,257.987945,-42.462291,1002.023437);
-        }
-    }
-    else
-    {
-        if (IsPlayerInEvent(playerid))
-            return 1;
-
         SetPlayerFacingAngle(playerid, PlayerData[playerid][pPos][3]);
-
         SetPlayerInterior(playerid, PlayerData[playerid][pInterior]);
         SetPlayerVirtualWorld(playerid, PlayerData[playerid][pWorld]);
-
         SetCameraBehindPlayer(playerid);
         SetAccessories(playerid);
 
-        if(PlayerData[playerid][pWorld] == PRISON_WORLD) {
-            SetPlayerPosEx(playerid, PlayerData[playerid][pPos][0], PlayerData[playerid][pPos][1], PlayerData[playerid][pPos][2], 3000);
-        }
-        else
-        {
-            if(PlayerData[playerid][pSpawnPoint] == 3 && PlayerData[playerid][pInjured] == 0) {
-                SetPlayerPosEx(playerid, PlayerData[playerid][pPos][0], PlayerData[playerid][pPos][1], PlayerData[playerid][pPos][2], 3000);
-            }
-        }
+        SavePlayerWeapon(playerid);
+        SetPlayerPosEx(playerid, PlayerData[playerid][pPos][0], PlayerData[playerid][pPos][1], PlayerData[playerid][pPos][2], 1000);
+
+        TextDrawShowForPlayer(playerid, gServerTextdraws[0]);
+        TextDrawSetString(gServerTextdraws[0], "You_are_injured._Wait_3_minutes_before_you_can_use_the_command~r~/giveup");
+
+        SendClientMessage(playerid, X11_TOMATO_1, "WARNING:"WHITE" Anda terluka dan membutuhkan pertolongan medis (/call 911 > Fires).");
+        SendClientMessage(playerid, X11_GREY_60, "USAGE:"WHITE" (( /giveup untuk spawn ke rumah sakit. Tunggu 3 menit agar bisa melakukannya. ))");
+
+        if (ReturnArmour2(playerid))
+            SetPlayerArmour(playerid, ReturnArmour2(playerid));
+
+        SetPVarInt(playerid, "GiveUptime", gettime());
+        //ApplyAnimation(playerid, "PED", "KO_skid_front", 4.1, 0, 0, 0, 1, 0, 1);
 
         for (new i = 0; i != MAX_ACC; i ++) if (AccData[playerid][i][accExists] && AccData[playerid][i][accShow]) {
             Aksesoris_Attach(playerid, i);
         }
+        return 1; // STOP DISINI - Agar tidak muncul spawn selector
+    }
 
-        if(PlayerData[playerid][pInjured])
-        {
-            SavePlayerWeapon(playerid);
+    // =========================================================================
+    // 6. SPAWN SELECTION (HANYA UNTUK FIRST LOGIN / FRESH SPAWN)
+    // =========================================================================
 
-            SetPlayerPosEx(playerid, PlayerData[playerid][pPos][0], PlayerData[playerid][pPos][1], PlayerData[playerid][pPos][2], 1000);
+    // Logic: Jika "PendingSpawnSelect" (dari login) ATAU "Belum Pernah Spawn Sesi Ini" (HasSpawned == 0)
+    // Dan player TIDAK Jail, TIDAK Hospital, TIDAK Injured (sudah difilter diatas)
 
-            TextDrawShowForPlayer(playerid, gServerTextdraws[0]);
-            TextDrawSetString(gServerTextdraws[0], "You_are_injured._Wait_3_minutes_before_you_can_use_the_command~r~/giveup");
+    /* Spawn selector removed: players will use default spawn flow. */
 
-            SendClientMessage(playerid, X11_TOMATO_1, "WARNING:"WHITE" Anda terluka dan membutuhkan pertolongan medis (/call 911 > Fires).");
-            SendClientMessage(playerid, X11_GREY_60, "USAGE:"WHITE" (( /giveup untuk spawn ke rumah sakit. Tunggu 3 menit agar bisa melakukannya. ))");
+    // =========================================================================
+    // 7. DEFAULT RESPAWN (Jika mati biasa/respawn event)
+    // =========================================================================
 
-            if (ReturnArmour2(playerid))
-                SetPlayerArmour(playerid, ReturnArmour2(playerid));
+    if(PlayerData[playerid][pOnDuty])
+    {
+        if (!IsPlayerInEvent(playerid)) {
+            SetPlayerSkinEx(playerid, PlayerData[playerid][pSkinFaction], 1);
 
-            SetPVarInt(playerid, "GiveUptime", gettime());
-            //ApplyAnimation(playerid, "PED", "KO_skid_front", 4.1, 0, 0, 0, 1, 0, 1);
+            if(PlayerData[playerid][pSpectator] == INVALID_PLAYER_ID)
+                SetFactionColor(playerid);
         }
-        else
-        {
-            if (!IsPlayerInEvent(playerid)) {
-                SetPlayerHealth(playerid, PlayerData[playerid][pHealth]);
-                SetPlayerArmour(playerid, PlayerData[playerid][pArmorStatus]);
-
-                if(IsPlayerDuty(playerid))  RefreshFactionWeapon(playerid);
-                else RefreshWeapon(playerid);
-            }
+    }
+    else {
+        if (!IsPlayerInEvent(playerid)) {
+            SetPlayerSkinEx(playerid, PlayerData[playerid][pSkin]);
         }
+    }
+
+    // Restore Weapon & Health untuk normal spawn
+    if (!IsPlayerInEvent(playerid)) {
+        SetPlayerHealth(playerid, PlayerData[playerid][pHealth]);
+        SetPlayerArmour(playerid, PlayerData[playerid][pArmorStatus]);
+
+        if(IsPlayerDuty(playerid))  RefreshFactionWeapon(playerid);
+        else RefreshWeapon(playerid);
+    }
+
+    // Accessories
+    SetAccessories(playerid);
+    for (new i = 0; i != MAX_ACC; i ++) if (AccData[playerid][i][accExists] && AccData[playerid][i][accShow]) {
+        Aksesoris_Attach(playerid, i);
     }
 
     if (PlayerData[playerid][pCuffed]) {
         SetPlayerSpecialAction(playerid, SPECIAL_ACTION_CUFFED);
     }
-    //sementara
+
+    // Admin Duty Color
     if (AccountData[playerid][pAdminDuty]) {
-        // SetPlayerHealth(playerid, 100);
         SetPlayerColor(playerid, RemoveAlpha(X11_RED_2));
     }
 
+    // Set Skills
     SetPlayerSkillLevel(playerid, WEAPONSKILL_DESERT_EAGLE, 999);
     SetPlayerSkillLevel(playerid, WEAPONSKILL_SHOTGUN, 999);
     SetPlayerSkillLevel(playerid, WEAPONSKILL_SAWNOFF_SHOTGUN, 0);
@@ -29479,7 +29501,6 @@ public OnPlayerSpawn(playerid)
     SetPlayerSkillLevel(playerid, WEAPONSKILL_AK47, 999);
     SetPlayerSkillLevel(playerid, WEAPONSKILL_M4, 999);
     SetPlayerSkillLevel(playerid, WEAPONSKILL_SNIPERRIFLE, 999);
-
     SetPlayerSkillLevel(playerid, WEAPONSKILL_PISTOL, 0);
     SetPlayerSkillLevel(playerid, WEAPONSKILL_MICRO_UZI, 0);
     SetPlayerSkillLevel(playerid, WEAPONSKILL_PISTOL_SILENCED, 999);
@@ -29491,7 +29512,6 @@ public OnPlayerSpawn(playerid)
 	}
     return 1;
 }
-
 public OnPlayerCommandReceived(playerid, cmdtext[])
 {
     if(!SQL_IsCharacterLogged(playerid) || !SQL_IsLogged(playerid) || (PlayerData[playerid][pKilled] > 0))
@@ -30326,6 +30346,8 @@ public OnModelSelectionResponse(playerid, extraid, index, modelid, response)
         SetDynamicObjectMaterialText(PlayerData[playerid][pTutorialObjectGate], 0, sprintf("Selamat datang ...\n\n"GREEN"%s", ReturnName(playerid, 0)), 130, "Ariel", 30, 1, -1, -16777216, 1);
         SetPlayerVirtualWorld(playerid, playerid+1);
         SetTimerEx("DestroyObjectGate", 5000, false, "d", playerid);
+
+        // Newly created character: use default spawn point (no spawn selector)
     }
     if((response) && (extraid == MODEL_SELECTION_ROADBLOCK))
     {
@@ -68272,16 +68294,24 @@ CMD:tackle(playerid, params[])
     if(PlayerData[playerid][pInjured] || PlayerData[playerid][pCuffed] || KnockedDown[playerid])
         return SendErrorMessage(playerid, "Kamu tidak bisa melakukan ini dalam kondisimu sekarang.");
 
+    // 3. Cek Cooldown (3 detik)
+    if(GetTickCount() < TackleCooldown[playerid])
+    {
+        return SendErrorMessage(playerid, "Kamu masih dalam cooldown tackle. Tunggu beberapa saat.");
+    }
+
     // 4. Toggle Mode
     if(TackleMode[playerid])
     {
         TackleMode[playerid] = 0;
-        SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: "WHITE"Mode Tackle "RED"NON-AKTIF"WHITE".");
+        SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: {FFFFFF}Mode Tackle {FF0000}NON-AKTIF{FFFFFF}.");
     }
     else
     {
         TackleMode[playerid] = 1;
-        SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: "WHITE"Mode Tackle "GREEN"AKTIF"WHITE". Pukul (Fist) target yang berlari untuk menjatuhkan.");
+        // Set cooldown untuk tackle (3 detik = 3000 ms)
+        TackleCooldown[playerid] = GetTickCount() + 3000;
+        SendClientMessage(playerid, X11_LIGHTBLUE, "TACKLE: {FFFFFF}Mode Tackle {00FF00}AKTIF{FFFFFF}. Pukul (Fist) target yang berlari untuk menjatuhkan.");
     }
     return 1;
 }
@@ -68297,6 +68327,33 @@ public TackleAnimFix(playerid)
     {
         // Kalau sudah tidak knocked down, matikan timer ini
         KillTimer(TackleTimer[playerid]);
+    }
+    return 1;
+}
+
+// Dipanggil untuk membuat player bangun dari knocked down
+public ClearKnock(playerid)
+{
+    if(!IsPlayerConnected(playerid))
+        return 0;
+    
+    if(KnockedDown[playerid])
+    {
+        KnockedDown[playerid] = 0;
+        
+        // Matikan timer animasi jika masih aktif
+        if(TackleTimer[playerid] != -1)
+        {
+            KillTimer(TackleTimer[playerid]);
+            TackleTimer[playerid] = -1;
+        }
+        
+        // Unfreeze player
+        TogglePlayerControllable(playerid, 1);
+        ClearAnimations(playerid);
+        
+        // Animasi bangun
+        ApplyAnimation(playerid, "PED", "getup", 4.1, 0, 0, 0, 0, 0, 1);
     }
     return 1;
 }

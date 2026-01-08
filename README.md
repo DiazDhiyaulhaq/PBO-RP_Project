@@ -1,10 +1,9 @@
-# Vision Gamers Roleplay
-[![sampctl](https://img.shields.io/badge/SAMPCTL-Vision-Gamers--Roleplay-2f2f2f.svg?style=for-the-badge)](https://github.com/NvalrnzJuju/VRP)
+# PBO Roleplay
 
-## Installation
+## Installationz
 Simply install to your project:
 ```bash
-sampctl package install NvalrnzJuju/VRP
+sampctl package install 	pborp/VRP
 ```
 
 Include to your script:
